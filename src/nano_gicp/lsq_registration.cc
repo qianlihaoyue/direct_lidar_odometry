@@ -39,7 +39,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *************************************************************************/
 
-#include <dlo/dlo.h>
+#include "type.h"
 #include <nano_gicp/lsq_registration.hpp>
 #include <nano_gicp/impl/lsq_registration_impl.hpp>
 

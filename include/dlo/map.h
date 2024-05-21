@@ -8,52 +8,38 @@
  ***********************************************************/
 
 #include "dlo/dlo.h"
+#include <pcl/io/pcd_io.h>
+// #include <direct_lidar_odometry/srv/save_pcd.>
 
-class dlo::MapNode {
-
+class MapNode : public rclcpp::Node {
 public:
-
-  MapNode(ros::NodeHandle node_handle);
-  ~MapNode();
-
-  static void abort() {
-    abort_ = true;
-  }
-
-  void start();
-  void stop();
+    MapNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:
+    template <typename T>
+    void declare_and_get_parameter(const std::string& param_yaml, const T& default_value, T& param_var) {
+        this->declare_parameter<T>(param_yaml, default_value);
+        this->get_parameter(param_yaml, param_var);
+    }
 
-  void abortTimerCB(const ros::TimerEvent& e);
-  void publishTimerCB(const ros::TimerEvent& e);
+    void publishTimerCB();
+    void keyframeCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr keyframe);
 
-  void keyframeCB(const sensor_msgs::PointCloud2ConstPtr& keyframe);
+    rclcpp::TimerBase::SharedPtr publish_timer;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_sub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub;
 
-  bool savePcd(direct_lidar_odometry::save_pcd::Request& req,
-               direct_lidar_odometry::save_pcd::Response& res);
+    // rclcpp::Service<direct_lidar_odometry::srv::SavePcd>::SharedPtr save_pcd_srv_;
+    // void savePcd(const std::shared_ptr<direct_lidar_odometry::srv::SavePcd::Request> request,
+    //              std::shared_ptr<direct_lidar_odometry::srv::SavePcd::Response> response);
 
-  void getParams();
+    CloudPtr dlo_map;
+    pcl::VoxelGrid<PointType> voxelgrid;
 
-  ros::NodeHandle nh;
-  ros::Timer abort_timer;
-  ros::Timer publish_timer;
+    rclcpp::Time map_stamp;
+    std::string odom_frame;
 
-  ros::Subscriber keyframe_sub;
-  ros::Publisher map_pub;
-
-  ros::ServiceServer save_pcd_srv;
-
-  pcl::PointCloud<PointType>::Ptr dlo_map;
-  pcl::VoxelGrid<PointType> voxelgrid;
-
-  ros::Time map_stamp;
-  std::string odom_frame;
-
-  bool publish_full_map_;
-  double publish_freq_;
-  double leaf_size_;
-
-  static std::atomic<bool> abort_;
-
+    bool publish_full_map_;
+    double publish_freq_;
+    double leaf_size_;
 };

@@ -1,0 +1,70 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+      // Example launch of a python file
+      {
+        "name": "Launch",
+        "type": "python",
+        "request": "launch",
+        // "program": "${workspaceFolder}/../../install/${input:package}/share/${input:package}/launch/${input:launchpy}",
+        "program": "${workspaceFolder}/../../install/direct_lidar_odometry/share/direct_lidar_odometry/launch/launch.py",
+        "console": "integratedTerminal",
+      },
+        // Example gdb launch of a ros executable
+        {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../../install/direct_lidar_odometry/lib/direct_lidar_odometry/dlo_odom_node",
+            "args": ["--ros-args --params-file /home/qianliyue/rosdev2/lio_ws/install/direct_lidar_odometry/share/direct_lidar_odometry/config/params.yaml"],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+            {
+                "description": "Enable pretty-printing for gdb",
+                "text": "-enable-pretty-printing",
+                "ignoreFailures": true
+            }
+            ]
+        },
+        {
+            "name": "(gdb) Launch_map",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../../install/direct_lidar_odometry/lib/direct_lidar_odometry/dlo_map_node",
+            "args": ["--ros-args --params-file /home/qianliyue/rosdev2/lio_ws/install/direct_lidar_odometry/share/direct_lidar_odometry/config/params.yaml"],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+            {
+                "description": "Enable pretty-printing for gdb",
+                "text": "-enable-pretty-printing",
+                "ignoreFailures": true
+            }
+            ]
+        }
+    ],
+
+
+    // "inputs": [
+    //   {
+    //     "id": "package",
+    //     "type": "promptString",
+    //     "description": "Package name",
+    //     "default": "direct_lidar_odometry"
+    //   },
+    //   {
+    //     "id": "launchpy",
+    //     "type": "promptString",
+    //     "description": "Program name",
+    //     "default": "launch.py"
+    //   }
+    // ]
+  }

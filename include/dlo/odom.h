@@ -9,242 +9,208 @@
 
 #include "dlo/dlo.h"
 
-class dlo::OdomNode {
+#include <pcl/surface/concave_hull.h>
+#include <pcl/surface/convex_hull.h>
+#include <pcl/filters/crop_box.h>
+#include <boost/circular_buffer.hpp>
 
+#include <sensor_msgs/msg/imu.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+
+class OdomNode : public rclcpp::Node {
 public:
-
-  OdomNode(ros::NodeHandle node_handle);
-  ~OdomNode();
-
-  static void abort() {
-    abort_ = true;
-  }
-
-  void start();
-  void stop();
+    OdomNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:
+    template <typename T>
+    void declare_and_get_parameter(const std::string& param_yaml, const T& default_value, T& param_var) {
+        this->declare_parameter<T>(param_yaml, default_value);
+        this->get_parameter(param_yaml, param_var);
+    }
 
-  void abortTimerCB(const ros::TimerEvent& e);
-  void icpCB(const sensor_msgs::PointCloud2ConstPtr& pc);
-  void imuCB(const sensor_msgs::Imu::ConstPtr& imu);
-  bool saveTrajectory(direct_lidar_odometry::save_traj::Request& req,
-                      direct_lidar_odometry::save_traj::Response& res);
+    void icpCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc);
+    void imuCB(const sensor_msgs::msg::Imu::ConstSharedPtr imu);
 
-  void getParams();
+    // ros::ServiceServer save_traj_srv;
+    // bool saveTrajectory(direct_lidar_odometry::save_traj::Request& req,
+    //                     direct_lidar_odometry::save_traj::Response& res);
 
-  void publishToROS();
-  void publishPose();
-  void publishTransform();
-  void publishKeyframe();
+    void getParams();
 
-  void preprocessPoints();
-  void initializeInputTarget();
-  void setInputSources();
+    void debugFun();
+    void debug();
 
-  void initializeDLO();
-  void gravityAlign();
+    void publishPose();
+    void publishTransform();
+    void publishKeyframe();
 
-  void getNextPose();
-  void integrateIMU();
+    void preprocessPoints();
+    void initializeInputTarget();
+    void setInputSources();
 
-  void propagateS2S(Eigen::Matrix4f T);
-  void propagateS2M();
+    void initializeDLO();
+    void gravityAlign();
 
-  void setAdaptiveParams();
+    void getNextPose();
+    void integrateIMU();
 
-  void computeMetrics();
-  void computeSpaciousness();
+    void setAdaptiveParams();
 
-  void transformCurrentScan();
-  void updateKeyframes();
-  void computeConvexHull();
-  void computeConcaveHull();
-  void pushSubmapIndices(std::vector<float> dists, int k, std::vector<int> frames);
-  void getSubmapKeyframes();
+    void computeSpaciousness();
 
-  void debug();
+    void updateKeyframes();
+    void computeConvexHull();
+    void computeConcaveHull();
+    void pushSubmapIndices(std::vector<float> dists, int k, std::vector<int> frames);
+    void getSubmapKeyframes();
 
-  double first_imu_time;
+    double first_imu_time;
 
-  ros::NodeHandle nh;
-  ros::Timer abort_timer;
-  
-  ros::ServiceServer save_traj_srv;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
-  ros::Subscriber icp_sub;
-  ros::Subscriber imu_sub;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr icp_sub;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
 
-  ros::Publisher odom_pub;
-  ros::Publisher pose_pub;
-  ros::Publisher keyframe_pub;
-  ros::Publisher kf_pub;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub, kf_pub;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_pub;
 
-  Eigen::Vector3f origin;
-  std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> trajectory;
-  std::vector<std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>, pcl::PointCloud<PointType>::Ptr>> keyframes;
-  std::vector<std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>>> keyframe_normals;
+    Eigen::Vector3f origin;
+    std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> trajectory;
+    std::vector<std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>, CloudPtr>> keyframes;
+    std::vector<std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>>> keyframe_normals;
 
-  std::atomic<bool> dlo_initialized;
-  std::atomic<bool> imu_calibrated;
+    std::atomic<bool> dlo_initialized, imu_calibrated;
 
-  std::string odom_frame;
-  std::string child_frame;
+    std::string lidarTopic, imuTopic;
 
-  pcl::PointCloud<PointType>::Ptr original_scan;
-  pcl::PointCloud<PointType>::Ptr current_scan;
-  pcl::PointCloud<PointType>::Ptr current_scan_t;
+    std::string odom_frame, child_frame;
 
-  pcl::PointCloud<PointType>::Ptr keyframes_cloud;
-  pcl::PointCloud<PointType>::Ptr keyframe_cloud;
-  int num_keyframes;
+    CloudPtr original_scan, current_scan, current_scan_t;
 
-  pcl::ConvexHull<PointType> convex_hull;
-  pcl::ConcaveHull<PointType> concave_hull;
-  std::vector<int> keyframe_convex;
-  std::vector<int> keyframe_concave;
+    // CloudPtr keyframes_cloud;
+    CloudPtr keyframe_cloud;
+    int num_keyframes;
 
-  pcl::PointCloud<PointType>::Ptr submap_cloud;
-  std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>> submap_normals;
+    pcl::ConvexHull<PointType> convex_hull;
+    pcl::ConcaveHull<PointType> concave_hull;
+    std::vector<int> keyframe_convex, keyframe_concave;
 
-  std::vector<int> submap_kf_idx_curr;
-  std::vector<int> submap_kf_idx_prev;
-  std::atomic<bool> submap_hasChanged;
+    CloudPtr submap_cloud;
+    std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>> submap_normals;
 
-  pcl::PointCloud<PointType>::Ptr source_cloud;
-  pcl::PointCloud<PointType>::Ptr target_cloud;
+    std::vector<int> submap_kf_idx_curr, submap_kf_idx_prev;
+    std::atomic<bool> submap_hasChanged;
 
-  ros::Time scan_stamp;
+    CloudPtr source_cloud, target_cloud;
 
-  double curr_frame_stamp;
-  double prev_frame_stamp;
-  std::vector<double> comp_times;
+    rclcpp::Time scan_stamp;
 
-  nano_gicp::NanoGICP<PointType, PointType> gicp_s2s;
-  nano_gicp::NanoGICP<PointType, PointType> gicp;
+    double curr_frame_stamp, prev_frame_stamp;
+    std::vector<double> comp_times;
 
-  pcl::CropBox<PointType> crop;
-  pcl::VoxelGrid<PointType> vf_scan;
-  pcl::VoxelGrid<PointType> vf_submap;
+    nano_gicp::NanoGICP<PointType, PointType> gicp_s2s;
+    nano_gicp::NanoGICP<PointType, PointType> gicp;
 
-  nav_msgs::Odometry odom;
-  nav_msgs::Odometry kf;
+    pcl::CropBox<PointType> crop;
+    pcl::VoxelGrid<PointType> vf_scan, vf_submap;
 
-  geometry_msgs::PoseStamped pose_ros;
+    nav_msgs::msg::Odometry odom, kf;
 
-  Eigen::Matrix4f T;
-  Eigen::Matrix4f T_s2s, T_s2s_prev;
-  Eigen::Quaternionf q_final;
+    geometry_msgs::msg::PoseStamped pose_ros;
 
-  Eigen::Vector3f pose_s2s;
-  Eigen::Matrix3f rotSO3_s2s;
-  Eigen::Quaternionf rotq_s2s;
+    Eigen::Matrix4f T, T_s2s, T_s2s_prev;
+    Eigen::Quaternionf q_final;
 
-  Eigen::Vector3f pose;
-  Eigen::Matrix3f rotSO3;
-  Eigen::Quaternionf rotq;
+    Eigen::Vector3f pose_s2s;
+    Eigen::Matrix3f rotSO3_s2s;
+    Eigen::Quaternionf rotq_s2s;
 
-  Eigen::Matrix4f imu_SE3;
+    Eigen::Vector3f pose;
+    Eigen::Matrix3f rotSO3;
+    Eigen::Quaternionf rotq;
 
-  struct XYZd {
-    double x;
-    double y;
-    double z;
-  };
+    Eigen::Matrix4f imu_SE3;
 
-  struct ImuBias {
-    XYZd gyro;
-    XYZd accel;
-  };
+    struct XYZd {
+        double x, y, z;
+    };
 
-  ImuBias imu_bias;
+    struct ImuBias {
+        XYZd gyro, accel;
+    };
 
-  struct ImuMeas {
-    double stamp;
-    XYZd ang_vel;
-    XYZd lin_accel;
-  };
+    ImuBias imu_bias;
 
-  ImuMeas imu_meas;
+    struct ImuMeas {
+        double stamp;
+        XYZd ang_vel, lin_accel;
+    };
 
-  boost::circular_buffer<ImuMeas> imu_buffer;
+    ImuMeas imu_meas;
 
-  static bool comparatorImu(ImuMeas m1, ImuMeas m2) {
-    return (m1.stamp < m2.stamp);
-  };
+    boost::circular_buffer<ImuMeas> imu_buffer;
 
-  struct Metrics {
-    std::vector<float> spaciousness;
-  };
+    static bool comparatorImu(ImuMeas m1, ImuMeas m2) { return (m1.stamp < m2.stamp); };
 
-  Metrics metrics;
+    struct Metrics {
+        std::vector<float> spaciousness;
+    };
 
-  static std::atomic<bool> abort_;
-  std::atomic<bool> stop_publish_thread;
-  std::atomic<bool> stop_publish_keyframe_thread;
-  std::atomic<bool> stop_metrics_thread;
-  std::atomic<bool> stop_debug_thread;
+    Metrics metrics;
 
-  std::thread publish_thread;
-  std::thread publish_keyframe_thread;
-  std::thread metrics_thread;
-  std::thread debug_thread;
+    std::thread debug_thread;
+    std::mutex mtx_imu;
 
-  std::mutex mtx_imu;
+    // debug
+    std::string cpu_type;
+    std::vector<double> cpu_percents;
+    clock_t lastCPU, lastSysCPU, lastUserCPU;
+    int numProcessors;
 
-  std::string cpu_type;
-  std::vector<double> cpu_percents;
-  clock_t lastCPU, lastSysCPU, lastUserCPU;
-  int numProcessors;
+    // Parameters
+    bool gravity_align_;
 
-  // Parameters
-  std::string version_;
+    double keyframe_thresh_dist_, keyframe_thresh_rot_;
 
-  bool gravity_align_;
+    int submap_knn_, submap_kcv_, submap_kcc_;
+    double submap_concave_alpha_;
 
-  double keyframe_thresh_dist_;
-  double keyframe_thresh_rot_;
+    bool initial_pose_use_;
+    Eigen::Vector3f initial_position_;
+    Eigen::Quaternionf initial_orientation_;
 
-  int submap_knn_;
-  int submap_kcv_;
-  int submap_kcc_;
-  double submap_concave_alpha_;
+    bool crop_use_;
+    double crop_size_;
 
-  bool initial_pose_use_;
-  Eigen::Vector3f initial_position_;
-  Eigen::Quaternionf initial_orientation_;
+    bool vf_scan_use_;
+    double vf_scan_res_;
 
-  bool crop_use_;
-  double crop_size_;
+    bool vf_submap_use_;
+    double vf_submap_res_;
 
-  bool vf_scan_use_;
-  double vf_scan_res_;
+    bool adaptive_params_use_;
 
-  bool vf_submap_use_;
-  double vf_submap_res_;
+    bool imu_use_;
+    int imu_calib_time_;
+    int imu_buffer_size_;
 
-  bool adaptive_params_use_;
+    int gicp_min_num_points_;
 
-  bool imu_use_;
-  int imu_calib_time_;
-  int imu_buffer_size_;
+    int gicps2s_k_correspondences_;
+    double gicps2s_max_corr_dist_;
+    int gicps2s_max_iter_;
+    double gicps2s_transformation_ep_;
+    double gicps2s_euclidean_fitness_ep_;
+    int gicps2s_ransac_iter_;
+    double gicps2s_ransac_inlier_thresh_;
 
-  int gicp_min_num_points_;
-
-  int gicps2s_k_correspondences_;
-  double gicps2s_max_corr_dist_;
-  int gicps2s_max_iter_;
-  double gicps2s_transformation_ep_;
-  double gicps2s_euclidean_fitness_ep_;
-  int gicps2s_ransac_iter_;
-  double gicps2s_ransac_inlier_thresh_;
-
-  int gicps2m_k_correspondences_;
-  double gicps2m_max_corr_dist_;
-  int gicps2m_max_iter_;
-  double gicps2m_transformation_ep_;
-  double gicps2m_euclidean_fitness_ep_;
-  int gicps2m_ransac_iter_;
-  double gicps2m_ransac_inlier_thresh_;
-
+    int gicps2m_k_correspondences_;
+    double gicps2m_max_corr_dist_;
+    int gicps2m_max_iter_;
+    double gicps2m_transformation_ep_;
+    double gicps2m_euclidean_fitness_ep_;
+    int gicps2m_ransac_iter_;
+    double gicps2m_ransac_inlier_thresh_;
 };

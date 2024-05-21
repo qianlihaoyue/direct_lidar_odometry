@@ -39,7 +39,7 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *************************************************************************/
 
-#include <dlo/dlo.h>
+#include "type.h"
 #include <nano_gicp/nanoflann.hpp>
 #include <nano_gicp/impl/nanoflann_impl.hpp>
 

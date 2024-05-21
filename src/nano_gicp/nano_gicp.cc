@@ -39,7 +39,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *************************************************************************/
 
-#include <dlo/dlo.h>
+#include "type.h"
 #include <nano_gicp/nano_gicp.hpp>
 #include <nano_gicp/impl/nano_gicp_impl.hpp>
 
