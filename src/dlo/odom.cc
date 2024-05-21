@@ -1,19 +1,28 @@
 #include "dlo/odom.h"
-#include <sys/times.h>
-#include <sys/vtimes.h>
 
 OdomNode::OdomNode(const rclcpp::NodeOptions& options) : Node("dlo_odom_node", options) {
     getParams();
 
     dlo_initialized = imu_calibrated = false;
 
-    icp_sub = create_subscription<sensor_msgs::msg::PointCloud2>(lidarTopic, rclcpp::SensorDataQoS(), std::bind(&OdomNode::icpCB, this, std::placeholders::_1));
-    imu_sub = create_subscription<sensor_msgs::msg::Imu>(imuTopic, rclcpp::SensorDataQoS(), std::bind(&OdomNode::imuCB, this, std::placeholders::_1));
+    if (lidarType == "livox")
+        icp_livox_sub = create_subscription<livox_ros_driver2::msg::CustomMsg>(lidarTopic, rclcpp::SensorDataQoS(),
+                                                                               std::bind(&OdomNode::icpLivoxCB, this, std::placeholders::_1));
+    else
+        icp_std_sub = create_subscription<sensor_msgs::msg::PointCloud2>(lidarTopic, rclcpp::SensorDataQoS(),
+                                                                         std::bind(&OdomNode::icpStdCB, this, std::placeholders::_1));
+
+    if (imu_use_)
+        imu_sub = create_subscription<sensor_msgs::msg::Imu>(imuTopic, rclcpp::SensorDataQoS(), std::bind(&OdomNode::imuCB, this, std::placeholders::_1));
 
     odom_pub = create_publisher<nav_msgs::msg::Odometry>("odom", 1);
-    kf_pub = create_publisher<nav_msgs::msg::Odometry>("kfs", 1);  // 1,true);
+    kf_pub = create_publisher<nav_msgs::msg::Odometry>("kfs", 1);
     pose_pub = create_publisher<geometry_msgs::msg::PoseStamped>("pose", 1);
-    keyframe_pub = create_publisher<sensor_msgs::msg::PointCloud2>("keyframe", 1);  // 1,true);
+    keyframe_pub = create_publisher<sensor_msgs::msg::PointCloud2>("keyframe", 1);
+
+    pubPath = create_publisher<nav_msgs::msg::Path>("path", 1);
+    globalPath.header.stamp = scan_stamp;
+    globalPath.header.frame_id = odom_frame;
     // save_traj_srv = create_service("SaveTraj", &OdomNode::saveTrajectory, this);
 
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -29,7 +38,7 @@ OdomNode::OdomNode(const rclcpp::NodeOptions& options) : Node("dlo_odom_node", o
     T = T_s2s = T_s2s_prev = Eigen::Matrix4f::Identity();
 
     pose_s2s = Eigen::Vector3f(0., 0., 0.);
-    rotq_s2s = Eigen::Quaternionf(1., 0., 0., 0.);
+    // rotq_s2s = Eigen::Quaternionf(1., 0., 0., 0.);
 
     pose = Eigen::Vector3f(0., 0., 0.);
     rotq = Eigen::Quaternionf(1., 0., 0., 0.);
@@ -44,21 +53,8 @@ OdomNode::OdomNode(const rclcpp::NodeOptions& options) : Node("dlo_odom_node", o
     imu_meas.lin_accel.x = imu_meas.lin_accel.y = imu_meas.lin_accel.z = 0.;
 
     imu_buffer.set_capacity(imu_buffer_size_);
-    first_imu_time = 0.;
 
-    original_scan = CloudPtr(new CloudType);
-    current_scan = CloudPtr(new CloudType);
-    current_scan_t = CloudPtr(new CloudType);
-
-    keyframe_cloud = CloudPtr(new CloudType);
-    // keyframes_cloud = CloudPtr(new CloudType);
-    num_keyframes = 0;
-
-    submap_cloud = CloudPtr(new CloudType);
     submap_hasChanged = true;
-    submap_kf_idx_prev.clear();
-
-    source_cloud = target_cloud = nullptr;
 
     convex_hull.setDimension(3);
     concave_hull.setDimension(3);
@@ -96,148 +92,8 @@ OdomNode::OdomNode(const rclcpp::NodeOptions& options) : Node("dlo_odom_node", o
 
     metrics.spaciousness.push_back(0.);
 
-    // debug
-    // char CPUBrandString[0x40];
-    // memset(CPUBrandString, 0, sizeof(CPUBrandString));
-    // cpu_type = "";
-    FILE* file;
-    struct tms timeSample;
-    char line[128];
-    lastCPU = times(&timeSample);
-    lastSysCPU = timeSample.tms_stime;
-    lastUserCPU = timeSample.tms_utime;
-    file = fopen("/proc/cpuinfo", "r");
-    numProcessors = 0;
-    while (fgets(line, 128, file) != NULL)
-        if (strncmp(line, "processor", 9) == 0) numProcessors++;
-    fclose(file);
-
+    debugInit();
     RCLCPP_INFO(rclcpp::get_logger("DirectLidarOdometry"), "DLO Odom Node Initialized");
-}
-
-void OdomNode::getParams() {
-    // Topic
-    declare_and_get_parameter<std::string>("odomNode.lidarTopic", "livox/lidar", lidarTopic);
-    declare_and_get_parameter<std::string>("odomNode.imuTopic", "livox/imu", imuTopic);
-
-    // Frames
-    declare_and_get_parameter<std::string>("odomNode.odom_frame", "odom", odom_frame);
-    declare_and_get_parameter<std::string>("odomNode.child_frame", "base_link", child_frame);
-
-    // Gravity alignment
-    declare_and_get_parameter<bool>("gravityAlign", false, gravity_align_);
-
-    // Keyframe Threshold
-    declare_and_get_parameter<double>("odomNode.keyframe.threshD", 0.1, keyframe_thresh_dist_);
-    declare_and_get_parameter<double>("odomNode.keyframe.threshR", 1.0, keyframe_thresh_rot_);
-
-    // Submap
-    declare_and_get_parameter<int>("odomNode.submap.keyframe.knn", 10, submap_knn_);
-    declare_and_get_parameter<int>("odomNode.submap.keyframe.kcv", 10, submap_kcv_);
-    declare_and_get_parameter<int>("odomNode.submap.keyframe.kcc", 10, submap_kcc_);
-
-    // Initial Position
-    declare_and_get_parameter<bool>("odomNode.initialPose.use", false, initial_pose_use_);
-
-    double px, py, pz, qx, qy, qz, qw;
-    declare_and_get_parameter<double>("odomNode.initialPose.position.x", 0.0, px);
-    declare_and_get_parameter<double>("odomNode.initialPose.position.y", 0.0, py);
-    declare_and_get_parameter<double>("odomNode.initialPose.position.z", 0.0, pz);
-    declare_and_get_parameter<double>("odomNode.initialPose.orientation.w", 1.0, qw);
-    declare_and_get_parameter<double>("odomNode.initialPose.orientation.x", 0.0, qx);
-    declare_and_get_parameter<double>("odomNode.initialPose.orientation.y", 0.0, qy);
-    declare_and_get_parameter<double>("odomNode.initialPose.orientation.z", 0.0, qz);
-    initial_position_ = Eigen::Vector3f(px, py, pz);
-    initial_orientation_ = Eigen::Quaternionf(qw, qx, qy, qz);
-
-    // Crop Box Filter
-    declare_and_get_parameter<bool>("odomNode.preprocessing.cropBoxFilter.use", false, crop_use_);
-    declare_and_get_parameter<double>("odomNode.preprocessing.cropBoxFilter.size", 1.0, crop_size_);
-
-    // Voxel Grid Filter
-    declare_and_get_parameter<bool>("odomNode.preprocessing.voxelFilter.scan.use", true, vf_scan_use_);
-    declare_and_get_parameter<double>("odomNode.preprocessing.voxelFilter.scan.res", 0.05, vf_scan_res_);
-    declare_and_get_parameter<bool>("odomNode.preprocessing.voxelFilter.submap.use", false, vf_submap_use_);
-    declare_and_get_parameter<double>("odomNode.preprocessing.voxelFilter.submap.res", 0.1, vf_submap_res_);
-
-    // Adaptive Parameters
-    declare_and_get_parameter<bool>("adaptiveParams", false, adaptive_params_use_);
-
-    // IMU
-    declare_and_get_parameter<bool>("imu", false, imu_use_);
-    declare_and_get_parameter<int>("odomNode.imu.calibTime", 3, imu_calib_time_);
-    declare_and_get_parameter<int>("odomNode.imu.bufferSize", 2000, imu_buffer_size_);
-
-    // GICP
-    declare_and_get_parameter<int>("odomNode.gicp.minNumPoints", 100, gicp_min_num_points_);
-    declare_and_get_parameter<int>("odomNode.gicp.s2s.kCorrespondences", 20, gicps2s_k_correspondences_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2s.maxCorrespondenceDistance", std::sqrt(std::numeric_limits<double>::max()), gicps2s_max_corr_dist_);
-    declare_and_get_parameter<int>("odomNode.gicp.s2s.maxIterations", 64, gicps2s_max_iter_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2s.transformationEpsilon", 0.0005, gicps2s_transformation_ep_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2s.euclideanFitnessEpsilon", -std::numeric_limits<double>::max(), gicps2s_euclidean_fitness_ep_);
-    declare_and_get_parameter<int>("odomNode.gicp.s2s.ransac.iterations", 0, gicps2s_ransac_iter_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2s.ransac.outlierRejectionThresh", 0.05, gicps2s_ransac_inlier_thresh_);
-    declare_and_get_parameter<int>("odomNode.gicp.s2m.kCorrespondences", 20, gicps2m_k_correspondences_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2m.maxCorrespondenceDistance", std::sqrt(std::numeric_limits<double>::max()), gicps2m_max_corr_dist_);
-    declare_and_get_parameter<int>("odomNode.gicp.s2m.maxIterations", 64, gicps2m_max_iter_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2m.transformationEpsilon", 0.0005, gicps2m_transformation_ep_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2m.euclideanFitnessEpsilon", -std::numeric_limits<double>::max(), gicps2m_euclidean_fitness_ep_);
-    declare_and_get_parameter<int>("odomNode.gicp.s2m.ransac.iterations", 0, gicps2m_ransac_iter_);
-    declare_and_get_parameter<double>("odomNode.gicp.s2m.ransac.outlierRejectionThresh", 0.05, gicps2m_ransac_inlier_thresh_);
-}
-
-void OdomNode::publishPose() {
-    // Sign flip check
-    static Eigen::Quaternionf q_diff{1., 0., 0., 0.};
-    static Eigen::Quaternionf q_last{1., 0., 0., 0.};
-
-    q_diff = q_last.conjugate() * rotq;
-
-    // If q_diff has negative real part then there was a sign flip
-    if (q_diff.w() < 0) {
-        rotq.w() = -rotq.w();
-        rotq.vec() = -rotq.vec();
-    }
-
-    q_last = rotq;
-
-    odom.pose.pose.position.x = pose[0], odom.pose.pose.position.y = pose[1], odom.pose.pose.position.z = pose[2];
-    odom.pose.pose.orientation.w = rotq.w();
-    odom.pose.pose.orientation.x = rotq.x(), odom.pose.pose.orientation.y = rotq.y(), odom.pose.pose.orientation.z = rotq.z();
-
-    odom.header.stamp = scan_stamp;
-    odom.header.frame_id = odom_frame;
-    odom.child_frame_id = child_frame;
-    odom_pub->publish(odom);
-
-    pose_ros.header.stamp = scan_stamp;
-    pose_ros.header.frame_id = odom_frame;
-
-    // pose_ros.pose = odom.pose.pose;
-    pose_ros.pose.position.x = pose[0], pose_ros.pose.position.y = pose[1], pose_ros.pose.position.z = pose[2];
-    pose_ros.pose.orientation.w = rotq.w();
-    pose_ros.pose.orientation.x = rotq.x(), pose_ros.pose.orientation.y = rotq.y(), pose_ros.pose.orientation.z = rotq.z();
-
-    pose_pub->publish(pose_ros);
-}
-
-void OdomNode::publishTransform() {
-    geometry_msgs::msg::TransformStamped transformStamped;
-
-    transformStamped.header.stamp = scan_stamp;
-    transformStamped.header.frame_id = odom_frame;
-    transformStamped.child_frame_id = child_frame;
-
-    transformStamped.transform.translation.x = pose[0];
-    transformStamped.transform.translation.y = pose[1];
-    transformStamped.transform.translation.z = pose[2];
-
-    transformStamped.transform.rotation.w = rotq.w();
-    transformStamped.transform.rotation.x = rotq.x();
-    transformStamped.transform.rotation.y = rotq.y();
-    transformStamped.transform.rotation.z = rotq.z();
-
-    tf_broadcaster_->sendTransform(transformStamped);
 }
 
 void OdomNode::publishKeyframe() {
@@ -262,7 +118,7 @@ void OdomNode::publishKeyframe() {
 }
 
 void OdomNode::preprocessPoints() {
-    *original_scan = *current_scan;
+    // *original_scan = *current_scan;
 
     // Remove NaNs
     std::vector<int> idx;
@@ -314,59 +170,6 @@ void OdomNode::initializeInputTarget() {
     ++num_keyframes;
 }
 
-void OdomNode::setInputSources() {
-    // set the input source for the S2S gicp
-    // this builds the KdTree of the source cloud
-    // this does not build the KdTree for s2m because force_no_update is true
-    gicp_s2s.setInputSource(current_scan);
-    // set pcl::Registration input source for S2M gicp using custom NanoGICP function
-    gicp.registerInputSource(current_scan);
-    // now set the KdTree of S2M gicp using previously built KdTree
-    gicp.source_kdtree_ = gicp_s2s.source_kdtree_;
-    gicp.source_covs_.clear();
-}
-
-void OdomNode::gravityAlign() {
-    // get average acceleration vector for 1 second and normalize
-    Eigen::Vector3f lin_accel = Eigen::Vector3f::Zero();
-    const double then = rclcpp::Clock().now().seconds();
-    int n = 0;
-    while ((rclcpp::Clock().now().seconds() - then) < 1.) {
-        lin_accel[0] += imu_meas.lin_accel.x;
-        lin_accel[1] += imu_meas.lin_accel.y;
-        lin_accel[2] += imu_meas.lin_accel.z;
-        ++n;
-    }
-    lin_accel[0] /= n, lin_accel[1] /= n, lin_accel[2] /= n;
-
-    // normalize
-    double lin_norm = sqrt(pow(lin_accel[0], 2) + pow(lin_accel[1], 2) + pow(lin_accel[2], 2));
-    lin_accel[0] /= lin_norm, lin_accel[1] /= lin_norm, lin_accel[2] /= lin_norm;
-
-    // define gravity vector (assume point downwards)
-    Eigen::Vector3f grav;
-    grav << 0, 0, 1;
-
-    // calculate angle between the two vectors
-    Eigen::Quaternionf grav_q = Eigen::Quaternionf::FromTwoVectors(lin_accel, grav).normalized();
-
-    // set gravity aligned orientation
-    rotq = grav_q;
-    T.block(0, 0, 3, 3) = rotq.toRotationMatrix();
-    T_s2s.block(0, 0, 3, 3) = rotq.toRotationMatrix();
-    T_s2s_prev.block(0, 0, 3, 3) = rotq.toRotationMatrix();
-
-    // rpy
-    auto euler = grav_q.toRotationMatrix().eulerAngles(2, 1, 0);
-    double yaw = euler[0] * (180.0 / M_PI);
-    double pitch = euler[1] * (180.0 / M_PI);
-    double roll = euler[2] * (180.0 / M_PI);
-
-    std::cout << "done" << std::endl;
-    std::cout << "  Roll [deg]: " << roll << std::endl;
-    std::cout << "  Pitch [deg]: " << pitch << std::endl << std::endl;
-}
-
 void OdomNode::initializeDLO() {
     // Calibrate IMU
     if (!imu_calibrated && imu_use_) return;
@@ -403,14 +206,45 @@ void OdomNode::initializeDLO() {
     std::cout << "DLO initialized! Starting localization..." << std::endl;
 }
 
-void OdomNode::icpCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc) {
-    double then = this->get_clock()->now().seconds();
+static void moveFromCustomMsg(livox_ros_driver2::msg::CustomMsg& Msg, CloudType& cloud) {
+    cloud.clear();
+    cloud.reserve(Msg.point_num);
+    PointType point;
+
+    cloud.header.frame_id = Msg.header.frame_id;
+    cloud.header.stamp = (uint64_t)((Msg.header.stamp.sec * 1e9 + Msg.header.stamp.nanosec) / 1000);
+    // cloud.header.seq=Msg.header.seq;
+
+    for (uint i = 0; i < Msg.point_num - 1; i++) {
+        point.x = Msg.points[i].x;
+        point.y = Msg.points[i].y;
+        point.z = Msg.points[i].z;
+        point.intensity = Msg.points[i].reflectivity;
+        // point.tag = Msg.points[i].tag;
+        // point.time = Msg.points[i].offset_time * 1e-9;
+        // point.ring = Msg.points[i].line;
+        cloud.push_back(point);
+    }
+}
+
+void OdomNode::icpLivoxCB(const livox_ros_driver2::msg::CustomMsg::SharedPtr pc) {
     scan_stamp = pc->header.stamp;
     curr_frame_stamp = pc->header.stamp.sec;
+    current_scan = CloudPtr(new CloudType);
+    moveFromCustomMsg(*pc, *current_scan);
+    icpCB(current_scan);
+}
 
-    // If there are too few points in the pointcloud, try again
+void OdomNode::icpStdCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc) {
+    scan_stamp = pc->header.stamp;
+    curr_frame_stamp = pc->header.stamp.sec;
     current_scan = CloudPtr(new CloudType);
     pcl::fromROSMsg(*pc, *current_scan);
+    icpCB(current_scan);
+}
+
+void OdomNode::icpCB(CloudPtr& current_scan) {
+    // If there are too few points in the pointcloud, try again
     if (current_scan->points.size() < gicp_min_num_points_) {
         RCLCPP_WARN(rclcpp::get_logger("DirectLidarOdometry"), "Low number of points!");
         return;
@@ -422,7 +256,12 @@ void OdomNode::icpCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc) {
         return;
     }
 
+    int t_pre, t_ff, t_fs, t_all;
+    TIMER_CREATE(tim_main);
+    TIMER_CREATE(tim_all);
+
     // Preprocess points
+    tim_main.tic();
     preprocessPoints();
 
     // Compute Metrics
@@ -442,97 +281,23 @@ void OdomNode::icpCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc) {
     source_cloud = current_scan;
 
     // Set new frame as input source for both gicp objects
-    setInputSources();
+    // setInputSources();
+    // set the input source for the S2S gicp
+    // this builds the KdTree of the source cloud
+    // this does not build the KdTree for s2m because force_no_update is true
+    gicp_s2s.setInputSource(current_scan);
+    // set pcl::Registration input source for S2M gicp using custom NanoGICP function
+    gicp.registerInputSource(current_scan);
+    // now set the KdTree of S2M gicp using previously built KdTree
+    gicp.source_kdtree_ = gicp_s2s.source_kdtree_;
+    gicp.source_covs_.clear();
+
+    t_pre = tim_main.toc();
 
     // Get the next pose via IMU + S2S + S2M
-    getNextPose();
 
-    // Update current keyframe poses and map
-    updateKeyframes();
-
-    // Update trajectory
-    trajectory.push_back(std::make_pair(pose, rotq));
-
-    // Update next time stamp
-    prev_frame_stamp = curr_frame_stamp;
-
-    // Update some statistics
-    comp_times.push_back(this->get_clock()->now().seconds() - then);
-
-    this->debug_thread = std::thread(&OdomNode::debugFun, this);
-    this->debug_thread.detach();
-}
-
-void OdomNode::debugFun() {
-    // Publish stuff to ROS
-    publishPose();
-    publishTransform();
-    // Debug statements and publish custom DLO message
-    debug();
-}
-
-void OdomNode::imuCB(const sensor_msgs::msg::Imu::ConstSharedPtr imu) {
-    if (!imu_use_) return;
-
-    double ang_vel[3], lin_accel[3];
-
-    // Get IMU samples
-    ang_vel[0] = imu->angular_velocity.x;
-    ang_vel[1] = imu->angular_velocity.y;
-    ang_vel[2] = imu->angular_velocity.z;
-
-    lin_accel[0] = imu->linear_acceleration.x;
-    lin_accel[1] = imu->linear_acceleration.y;
-    lin_accel[2] = imu->linear_acceleration.z;
-
-    if (first_imu_time == 0.) first_imu_time = imu->header.stamp.nanosec * 1e-9;
-
-    // IMU calibration procedure - do for three seconds
-    if (!imu_calibrated) {
-        static int num_samples = 0;
-        static bool print = true;
-
-        if ((imu->header.stamp.nanosec * 1e-9 - first_imu_time) < imu_calib_time_) {
-            num_samples++;
-
-            imu_bias.gyro.x += ang_vel[0], imu_bias.gyro.y += ang_vel[1], imu_bias.gyro.z += ang_vel[2];
-            imu_bias.accel.x += lin_accel[0], imu_bias.accel.y += lin_accel[1], imu_bias.accel.z += lin_accel[2];
-            if (print) {
-                std::cout << "Calibrating IMU for " << imu_calib_time_ << " seconds... ";
-                std::cout.flush();
-                print = false;
-            }
-        } else {
-            imu_bias.gyro.x /= num_samples, imu_bias.gyro.y /= num_samples, imu_bias.gyro.z /= num_samples;
-            imu_bias.accel.x /= num_samples, imu_bias.accel.y /= num_samples, imu_bias.accel.z /= num_samples;
-            imu_calibrated = true;
-
-            std::cout << "done" << std::endl;
-            std::cout << "  Gyro biases [xyz]: " << imu_bias.gyro.x << ", " << imu_bias.gyro.y << ", " << imu_bias.gyro.z << std::endl << std::endl;
-        }
-
-    } else {
-        // Apply the calibrated bias to the new IMU measurements
-        imu_meas.stamp = imu->header.stamp.nanosec * 1e-9;
-
-        imu_meas.ang_vel.x = ang_vel[0] - imu_bias.gyro.x;
-        imu_meas.ang_vel.y = ang_vel[1] - imu_bias.gyro.y;
-        imu_meas.ang_vel.z = ang_vel[2] - imu_bias.gyro.z;
-
-        imu_meas.lin_accel.x = lin_accel[0];
-        imu_meas.lin_accel.y = lin_accel[1];
-        imu_meas.lin_accel.z = lin_accel[2];
-
-        // Store into circular buffer
-        mtx_imu.lock();
-        imu_buffer.push_front(imu_meas);
-        mtx_imu.unlock();
-    }
-}
-
-void OdomNode::getNextPose() {
     ////// FRAME-TO-FRAME PROCEDURE
-
+    tim_main.tic();
     // Align using IMU prior if available
     CloudPtr aligned(new CloudType);
 
@@ -546,21 +311,21 @@ void OdomNode::getNextPose() {
     // Get the local S2S transform
     Eigen::Matrix4f T_S2S = gicp_s2s.getFinalTransformation();
     // Get the global S2S transform
-    // propagateS2S(T_S2S);
     T_s2s = T_s2s_prev * T_S2S;
     T_s2s_prev = T_s2s;
 
     pose_s2s << T_s2s(0, 3), T_s2s(1, 3), T_s2s(2, 3);
     rotSO3_s2s << T_s2s(0, 0), T_s2s(0, 1), T_s2s(0, 2), T_s2s(1, 0), T_s2s(1, 1), T_s2s(1, 2), T_s2s(2, 0), T_s2s(2, 1), T_s2s(2, 2);
-    rotq_s2s = Eigen::Quaternionf(rotSO3_s2s).normalized();
+    // rotq_s2s = Eigen::Quaternionf(rotSO3_s2s).normalized();
 
     // reuse covariances from s2s for s2m
     gicp.source_covs_ = gicp_s2s.source_covs_;
     // Swap source and target (which also swaps KdTrees internally) for next S2S
     gicp_s2s.swapSourceAndTarget();
 
-    ////// FRAME-TO-SUBMAP
+    t_ff = tim_main.toc();
 
+    ////// FRAME-TO-SUBMAP
     // Get current global submap
     getSubmapKeyframes();
     if (submap_hasChanged) {
@@ -584,51 +349,32 @@ void OdomNode::getNextPose() {
 
     // Set next target cloud as current source cloud
     *target_cloud = *source_cloud;
-}
 
-void OdomNode::integrateIMU() {
-    // Extract IMU data between the two frames
-    std::vector<ImuMeas> imu_frame;
+    t_fs = tim_main.toc();
 
-    for (const auto& i : imu_buffer) {
-        // IMU data between two frames is when:
-        //   current frame's timestamp minus imu timestamp is positive
-        //   previous frame's timestamp minus imu timestamp is negative
-        double curr_frame_imu_dt = curr_frame_stamp - i.stamp;
-        double prev_frame_imu_dt = prev_frame_stamp - i.stamp;
+    // Update current keyframe poses and map
+    updateKeyframes();
 
-        if (curr_frame_imu_dt >= 0. && prev_frame_imu_dt <= 0.) imu_frame.push_back(i);
+    // Update trajectory
+    trajectory.push_back(std::make_pair(pose, rotq));
+
+    // Update next time stamp
+    prev_frame_stamp = curr_frame_stamp;
+
+    t_all = tim_all.toc();
+
+    static int tim_cnt = 0;
+    if (tim_cnt > 5 || t_all > 30) {
+        tim_cnt = 0;
+        std::cout << "t_pre: " << t_pre << " t_ff: " << t_ff << " t_fs: " << t_fs << " t_all: " << t_all << std::endl;
     }
+    ++tim_cnt;
 
-    // Sort measurements by time
-    std::sort(imu_frame.begin(), imu_frame.end(), comparatorImu);
+    // Update some statistics
+    comp_times.push_back(t_all / 1000.0);
 
-    // Relative IMU integration of gyro and accelerometer
-    double curr_imu_stamp = 0., prev_imu_stamp = 0., dt;
-
-    Eigen::Quaternionf q = Eigen::Quaternionf::Identity();
-    for (uint32_t i = 0; i < imu_frame.size(); ++i) {
-        if (prev_imu_stamp == 0.) {
-            prev_imu_stamp = imu_frame[i].stamp;
-            continue;
-        }
-
-        // Calculate difference in imu measurement times IN SECONDS
-        curr_imu_stamp = imu_frame[i].stamp;
-        dt = curr_imu_stamp - prev_imu_stamp;
-        prev_imu_stamp = curr_imu_stamp;
-
-        // Relative gyro propagation quaternion dynamics
-        Eigen::Quaternionf qq = q;
-        q.w() -= 0.5 * (qq.x() * imu_frame[i].ang_vel.x + qq.y() * imu_frame[i].ang_vel.y + qq.z() * imu_frame[i].ang_vel.z) * dt;
-        q.x() += 0.5 * (qq.w() * imu_frame[i].ang_vel.x - qq.z() * imu_frame[i].ang_vel.y + qq.y() * imu_frame[i].ang_vel.z) * dt;
-        q.y() += 0.5 * (qq.z() * imu_frame[i].ang_vel.x + qq.w() * imu_frame[i].ang_vel.y - qq.x() * imu_frame[i].ang_vel.z) * dt;
-        q.z() += 0.5 * (qq.x() * imu_frame[i].ang_vel.y - qq.y() * imu_frame[i].ang_vel.x + qq.w() * imu_frame[i].ang_vel.z) * dt;
-    }
-
-    // Store IMU guess
-    imu_SE3 = Eigen::Matrix4f::Identity();
-    imu_SE3.block(0, 0, 3, 3) = q.normalized().toRotationMatrix();
+    this->debug_thread = std::thread(&OdomNode::debugFun, this);
+    this->debug_thread.detach();
 }
 
 // Compute Spaciousness of Current Scan
@@ -759,7 +505,9 @@ void OdomNode::updateKeyframes() {
         }
 
         // update keyframe vector
-        keyframes.push_back(std::make_pair(std::make_pair(pose, rotq), current_scan_t));
+        CloudPtr cur_kf(new CloudType);
+        *cur_kf = *current_scan_t;
+        keyframes.push_back(std::make_pair(std::make_pair(pose, rotq), cur_kf));
 
         // compute kdtree and keyframe normals (use gicp_s2s input source as temporary storage because it will be overwritten by setInputSources())
         // *keyframes_cloud += *current_scan_t;
@@ -892,112 +640,6 @@ void OdomNode::getSubmapKeyframes() {
         submap_cloud = submap_cloud_;
         submap_kf_idx_prev = submap_kf_idx_curr;
     }
-}
-
-// bool OdomNode::saveTrajectory(direct_lidar_odometry::save_traj::Request& req,
-//                                    direct_lidar_odometry::save_traj::Response& res) {
-//   std::string kittipath = req.save_path + "/kitti_traj.txt";
-//   std::ofstream out_kitti(kittipath);
-
-//   std::cout << std::setprecision(2) << "Saving KITTI trajectory to " << kittipath << "... "; std::cout.flush();
-
-//   for (const auto& pose : trajectory) {
-//     const auto& t = pose.first;
-//     const auto& q = pose.second;
-//     // Write to Kitti Format
-//     auto R = q.normalized().toRotationMatrix();
-//     out_kitti << std::fixed << std::setprecision(9)
-//       << R(0, 0) << " " << R(0, 1) << " " << R(0, 2) << " " << t.x() << " "
-//       << R(1, 0) << " " << R(1, 1) << " " << R(1, 2) << " " << t.y() << " "
-//       << R(2, 0) << " " << R(2, 1) << " " << R(2, 2) << " " << t.z() << "\n";
-//   }
-
-//   std::cout << "done" << std::endl;
-//   res.success = true;
-//   return res.success;
-// }
-
-void OdomNode::debug() {
-    // Total length traversed
-    double length_traversed = 0.;
-    Eigen::Vector3f p_curr = Eigen::Vector3f(0., 0., 0.);
-    Eigen::Vector3f p_prev = Eigen::Vector3f(0., 0., 0.);
-    for (const auto& t : trajectory) {
-        if (p_prev == Eigen::Vector3f(0., 0., 0.)) {
-            p_prev = t.first;
-            continue;
-        }
-        p_curr = t.first;
-        double l = sqrt(pow(p_curr[0] - p_prev[0], 2) + pow(p_curr[1] - p_prev[1], 2) + pow(p_curr[2] - p_prev[2], 2));
-
-        if (l >= 0.05) {
-            length_traversed += l;
-            p_prev = p_curr;
-        }
-    }
-
-    if (length_traversed == 0) publishKeyframe();
-
-    // Average computation time
-    double avg_comp_time = std::accumulate(comp_times.begin(), comp_times.end(), 0.0) / comp_times.size();
-
-    // RAM Usage
-    double vm_usage = 0.0, resident_set = 0.0;
-    std::ifstream stat_stream("/proc/self/stat", std::ios_base::in);  // get info from proc directory
-    std::string pid, comm, state, ppid, pgrp, session, tty_nr;
-    std::string tpgid, flags, minflt, cminflt, majflt, cmajflt;
-    std::string utime, stime, cutime, cstime, priority, nice;
-    std::string num_threads, itrealvalue, starttime;
-    unsigned long vsize;
-    long rss;
-    stat_stream >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr >> tpgid >> flags >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime >>
-        cutime >> cstime >> priority >> nice >> num_threads >> itrealvalue >> starttime >> vsize >> rss;  // don't care about the rest
-    stat_stream.close();
-    long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024;  // for x86-64 is configured to use 2MB pages
-    vm_usage = vsize / 1024.0;
-    resident_set = rss * page_size_kb;
-
-    // CPU Usage
-    struct tms timeSample;
-    clock_t now;
-    double cpu_percent;
-    now = times(&timeSample);
-    if (now <= lastCPU || timeSample.tms_stime < lastSysCPU || timeSample.tms_utime < lastUserCPU) {
-        cpu_percent = -1.0;
-    } else {
-        cpu_percent = (timeSample.tms_stime - lastSysCPU) + (timeSample.tms_utime - lastUserCPU);
-        cpu_percent /= (now - lastCPU);
-        cpu_percent /= numProcessors;
-        cpu_percent *= 100.;
-    }
-    lastCPU = now;
-    lastSysCPU = timeSample.tms_stime;
-    lastUserCPU = timeSample.tms_utime;
-    cpu_percents.push_back(cpu_percent);
-    double avg_cpu_usage = std::accumulate(cpu_percents.begin(), cpu_percents.end(), 0.0) / cpu_percents.size();
-
-    // Print to terminal
-    printf("\033[2J\033[1;1H");
-
-    std::cout << std::endl << "==== Direct LiDAR Odometry" << " ====" << std::endl;
-
-    // if (!cpu_type.empty()) std::cout << std::endl << cpu_type << " x " << numProcessors << std::endl;
-
-    std::cout << std::endl << std::setprecision(4) << std::fixed;
-    std::cout << "Position    [xyz]  :: " << pose[0] << " " << pose[1] << " " << pose[2] << std::endl;
-    std::cout << "Orientation [wxyz] :: " << rotq.w() << " " << rotq.x() << " " << rotq.y() << " " << rotq.z() << std::endl;
-    std::cout << "Distance Traveled  :: " << length_traversed << " meters" << std::endl;
-    std::cout << "Distance to Origin :: " << sqrt(pow(pose[0] - origin[0], 2) + pow(pose[1] - origin[1], 2) + pow(pose[2] - origin[2], 2)) << " meters"
-              << std::endl;
-
-    std::cout << std::endl << std::right << std::setprecision(2) << std::fixed;
-    std::cout << "Computation Time :: " << std::setfill(' ') << std::setw(6) << comp_times.back() * 1000. << " ms    // Avg: " << std::setw(5)
-              << avg_comp_time * 1000. << std::endl;
-    std::cout << "Cores Utilized   :: " << std::setfill(' ') << std::setw(6) << (cpu_percent / 100.) * numProcessors << " cores // Avg: " << std::setw(5)
-              << (avg_cpu_usage / 100.) * numProcessors << std::endl;
-    std::cout << "CPU Load         :: " << std::setfill(' ') << std::setw(6) << cpu_percent << " %     // Avg: " << std::setw(5) << avg_cpu_usage << std::endl;
-    std::cout << "RAM Allocation   :: " << std::setfill(' ') << std::setw(6) << resident_set / 1000. << " MB    // VSZ: " << vm_usage / 1000. << " MB "
-              << std::endl;
 }
 
 int main(int argc, char** argv) {

@@ -4,6 +4,8 @@
 
 - 1.0 - 5.21 - to ros2-foxy
 
+- 1.1 - 5.21 - add livox-360，代码优化
+
 
 #### [[IEEE RA-L](https://ieeexplore.ieee.org/document/9681177)] [[ArXiv](https://arxiv.org/abs/2110.00605)] [[Video](https://www.youtube.com/watch?v=APot6QP_wvg)] [[Code](https://github.com/vectr-ucla/direct_lidar_odometry)]
 

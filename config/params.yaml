@@ -1,18 +1,25 @@
 /**:
   ros__parameters:
     adaptiveParams: true
+    debugLog: true
 
-    imu: false
-    gravityAlign: true
+    imu:
+      use: false
+      gravityAlign: true
+      calibTime: 3
+      bufferSize: 2000
 
     mapNode:
-      publishFullMap: true
+      publishFullMap: false
       publishFreq: 1.0
       leafSize: 0.25
 
     odomNode:
-      lidarTopic: "/os1_points"
-      imuTopic: "/imu/data_raw"
+      lidarType: "livox" # livox  other
+      lidarTopic: "livox/lidar"
+      imuTopic: "livox/imu"
+      # lidarTopic: "/os1_points"
+      # imuTopic: "/imu/data_raw"
 
       odom_frame: odom
       child_frame: base_link
@@ -36,7 +43,7 @@
         voxelFilter:
           scan:
             use: true
-            res: 0.25
+            res: 0.5 #0.25
           submap:
             use: true
             res: 0.5
@@ -51,16 +58,12 @@
           kcv: 10
           kcc: 10
 
-      imu:
-        calibTime: 3
-        bufferSize: 2000
-
       gicp:
         minNumPoints: 10
         s2s:
           kCorrespondences: 10
           maxCorrespondenceDistance: 1.0
-          maxIterations: 32
+          maxIterations: 32  #32
           transformationEpsilon: 0.01
           euclideanFitnessEpsilon: 0.01
           ransac:

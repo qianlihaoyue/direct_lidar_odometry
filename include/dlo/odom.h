@@ -17,6 +17,12 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include "livox_ros_driver2/msg/custom_msg.hpp"
+
+// #include <fast_gicp/gicp/fast_gicp.hpp>
+// #include <fast_gicp/gicp/fast_gicp_st.hpp>
+// #include <fast_gicp/gicp/fast_vgicp.hpp>
 
 class OdomNode : public rclcpp::Node {
 public:
@@ -29,7 +35,9 @@ private:
         this->get_parameter(param_yaml, param_var);
     }
 
-    void icpCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc);
+    void icpLivoxCB(const livox_ros_driver2::msg::CustomMsg::SharedPtr pc);
+    void icpStdCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pc);
+    void icpCB(CloudPtr& current_scan);
     void imuCB(const sensor_msgs::msg::Imu::ConstSharedPtr imu);
 
     // ros::ServiceServer save_traj_srv;
@@ -39,6 +47,7 @@ private:
     void getParams();
 
     void debugFun();
+    void debugInit();
     void debug();
 
     void publishPose();
@@ -47,16 +56,12 @@ private:
 
     void preprocessPoints();
     void initializeInputTarget();
-    void setInputSources();
 
     void initializeDLO();
     void gravityAlign();
-
-    void getNextPose();
     void integrateIMU();
 
     void setAdaptiveParams();
-
     void computeSpaciousness();
 
     void updateKeyframes();
@@ -65,16 +70,18 @@ private:
     void pushSubmapIndices(std::vector<float> dists, int k, std::vector<int> frames);
     void getSubmapKeyframes();
 
-    double first_imu_time;
-
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr icp_sub;
+    rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr icp_livox_sub;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr icp_std_sub;
+
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
 
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub, kf_pub;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_pub;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath;
+    nav_msgs::msg::Path globalPath;
 
     Eigen::Vector3f origin;
     std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> trajectory;
@@ -83,21 +90,20 @@ private:
 
     std::atomic<bool> dlo_initialized, imu_calibrated;
 
-    std::string lidarTopic, imuTopic;
-
+    std::string lidarType, lidarTopic, imuTopic;
     std::string odom_frame, child_frame;
 
-    CloudPtr original_scan, current_scan, current_scan_t;
-
-    // CloudPtr keyframes_cloud;
-    CloudPtr keyframe_cloud;
-    int num_keyframes;
+    // CloudPtr original_scan{new CloudType()};
+    CloudPtr current_scan{new CloudType()}, current_scan_t{new CloudType()};
+    // CloudPtr keyframes_cloud{new CloudType()};
+    CloudPtr keyframe_cloud{new CloudType()};
+    int num_keyframes = 0;
 
     pcl::ConvexHull<PointType> convex_hull;
     pcl::ConcaveHull<PointType> concave_hull;
     std::vector<int> keyframe_convex, keyframe_concave;
 
-    CloudPtr submap_cloud;
+    CloudPtr submap_cloud{new CloudType()};
     std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>> submap_normals;
 
     std::vector<int> submap_kf_idx_curr, submap_kf_idx_prev;
@@ -113,6 +119,9 @@ private:
     nano_gicp::NanoGICP<PointType, PointType> gicp_s2s;
     nano_gicp::NanoGICP<PointType, PointType> gicp;
 
+    // fast_gicp::FastGICP<PointType, PointType> gicp_s2s;
+    // fast_gicp::FastGICP<PointType, PointType> gicp;
+
     pcl::CropBox<PointType> crop;
     pcl::VoxelGrid<PointType> vf_scan, vf_submap;
 
@@ -125,12 +134,13 @@ private:
 
     Eigen::Vector3f pose_s2s;
     Eigen::Matrix3f rotSO3_s2s;
-    Eigen::Quaternionf rotq_s2s;
+    // Eigen::Quaternionf rotq_s2s;
 
     Eigen::Vector3f pose;
     Eigen::Matrix3f rotSO3;
     Eigen::Quaternionf rotq;
 
+    ///// IMU
     Eigen::Matrix4f imu_SE3;
 
     struct XYZd {
@@ -154,6 +164,15 @@ private:
 
     static bool comparatorImu(ImuMeas m1, ImuMeas m2) { return (m1.stamp < m2.stamp); };
 
+    bool imu_use_;
+    int imu_calib_time_;
+    int imu_buffer_size_;
+    double first_imu_time = 0;
+
+    std::mutex mtx_imu;
+
+    ////////
+
     struct Metrics {
         std::vector<float> spaciousness;
     };
@@ -161,7 +180,6 @@ private:
     Metrics metrics;
 
     std::thread debug_thread;
-    std::mutex mtx_imu;
 
     // debug
     std::string cpu_type;
@@ -191,10 +209,7 @@ private:
     double vf_submap_res_;
 
     bool adaptive_params_use_;
-
-    bool imu_use_;
-    int imu_calib_time_;
-    int imu_buffer_size_;
+    bool debug_use_;
 
     int gicp_min_num_points_;
 

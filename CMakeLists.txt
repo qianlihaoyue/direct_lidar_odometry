@@ -81,7 +81,7 @@ target_link_libraries(nano_gicp ${PCL_LIBRARIES} ${OpenMP_LIBS} nanoflann)
 target_include_directories(nano_gicp PUBLIC include ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIR})
 
 # Odometry Node
-add_executable(dlo_odom_node src/dlo/odom.cc)
+add_executable(dlo_odom_node src/dlo/odom.cc src/dlo/odom_imu.cc src/dlo/odom_utility.cc)
 target_link_libraries(dlo_odom_node ${PCL_LIBRARIES} ${OpenMP_LIBS} Eigen3::Eigen Threads::Threads nano_gicp)
 ament_target_dependencies(dlo_odom_node ${dependencies})
 
